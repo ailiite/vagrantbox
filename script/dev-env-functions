@@ -1,0 +1,396 @@
+#!/bin/bash
+
+set -e
+source /usr/bin/virtualenvwrapper.sh
+mkdir -p /vagrant/logs
+
+apps_and_ports=`cat /vagrant/config/apps | grep -v \# | grep -v '^\s*$'`
+DEV_ENV_REQUIREMENTS=/vagrant/config/virtual-env-global-requirements.txt
+
+function get_port_for_app {
+  local app=$1
+
+  if [[ $(is_valid_app $app) = 1 ]] ; then
+    for app_and_port in ${apps_and_ports}; do
+      local found_app_name=`echo ${app_and_port} | cut -d':' -f1`
+      local found_app_port=`echo ${app_and_port} | cut -d':' -f2`
+
+      if [[ ${app} = ${found_app_name} ]] ; then
+        echo $found_app_port
+      fi
+    done
+  fi
+}
+
+function all_apps {
+  local apps
+
+  for app_and_port in ${apps_and_ports}; do
+    apps="`echo -n ${app_and_port} | cut -d':' -f1` ${apps}"
+  done
+
+  echo -n ${apps}
+}
+
+function is_valid_app {
+  local app=$1
+  local found_app_name
+
+  for app_and_port in ${apps_and_ports}; do
+    found_app_name=`echo ${app_and_port} | cut -d':' -f1`
+
+    if [[ ${app} = ${found_app_name} ]] ; then
+      echo 1
+    fi
+  done
+}
+
+function update_development_environment {
+  echo "Updating development environment"
+  git -C /vagrant pull
+  bootstrap
+}
+
+function update_submodules_for_app {
+  local app=$1
+  local app_dir=/vagrant/apps/${app}
+
+  if [[ -f ${app_dir}/.gitmodules ]] ; then
+      echo "Initialising git submodule for ${app}"
+      git -C ${app_dir} submodule init
+      git -C ${app_dir} submodule update
+      echo "git -C ${app_dir} submodule update"
+  fi
+}
+
+function checkout {
+  local app=$1
+  local app_dir=/vagrant/apps/${app}
+
+  if [[ ! -d ${app_dir} ]] ; then
+    mkdir -p /vagrant/apps/
+    git -C /vagrant/apps/ clone --recursive git@github.com:landregistry/${app}.git
+    update_submodules_for_app ${app}
+  fi
+}
+
+function source_app_environment {
+  local environment=/vagrant/apps/$1/environment.sh
+
+  if [[ -f ${environment} ]]; then
+    set +o errexit
+    source ${environment}
+    set -e
+  fi
+
+  if [ "$RUNNING_ACCEPTANCE_TESTS" = "true" ]; then
+    echo "RUNNING_ACCEPTANCE_TESTS = $RUNNING_ACCEPTANCE_TESTS"
+    local environment_acceptance=/vagrant/apps/$1/environment_acceptance.sh
+
+    if [[ -f ${environment_acceptance} ]]; then
+      set +o errexit
+      source ${environment_acceptance}
+      set -e
+    fi
+
+  fi
+
+}
+
+function source_app_test_environment {
+  local environment=/vagrant/apps/$1/environment_test.sh
+
+  if [[ -f ${environment} ]]; then
+    set +o errexit
+    source ${environment}
+    set -e
+  fi
+}
+
+function update_app {
+  local app=$1
+  local app_dir=/vagrant/apps/${app}
+
+  if [ -d ${app_dir} ] ; then
+    # presumably, if you're not on develop, you don't want interference, so
+    #+ only allow refreshes on develop
+    BRANCH=$(git -C ${app_dir} branch | grep "*")
+    if [ "${BRANCH/* /}" == "develop" ]; then
+
+      echo "Refreshing application ${app}"
+      git -C ${app_dir} pull
+      update_submodules_for_app ${app}
+    else
+      echo
+      echo -e "\e[36m\t>>> Skipping ${app} -- not on develop\e[0m"
+      echo
+    fi
+  fi
+}
+
+function branch_status {
+  local app=$1
+  local app_dir=/vagrant/apps/${app}
+
+  if [ -d ${app_dir} ] ; then
+    # presumably, if you're not on develop, you don't want interference, so
+    #+ only allow refreshes on develop
+    BRANCH=$(git -C ${app_dir} branch | grep "*" | sed 's/^..//')
+    echo "${app} is on branch ${BRANCH}"
+  fi
+}
+
+function create_virtual_env {
+  local app_name=$1
+
+  if [[ -d ${WORKON_HOME}/${app_name} ]] ; then
+    workon ${app_name}
+    deactivate
+  fi
+
+  echo "Creating python virtual env for ${app_name} in ${WORKON_HOME}"
+  set +o errexit
+  # TODO: We're having to add the site-packages here for GDAL. This may cause problems later
+  # and we need to figure out how to get GDAL to compile locally
+  mkvirtualenv -a "/vagrant/apps/${app_name}" -p /usr/bin/python3 -r ${DEV_ENV_REQUIREMENTS} ${app_name}
+  set -e
+
+  echo "Activating virtual environment [${app_name}]"
+  set +o errexit
+  workon ${app_name}
+  set -e
+  pip -q install -r ${DEV_ENV_REQUIREMENTS}
+
+  if [[ -f /vagrant/apps/${app_name}/requirements.txt ]] ; then
+    pip -q install -r /vagrant/apps/${app_name}/requirements.txt
+  fi
+
+  if [[ -f /vagrant/apps/${app_name}/requirements_test.txt ]] ; then
+    pip -q install -r /vagrant/apps/${app_name}/requirements_test.txt
+  fi
+}
+
+function create_virtual_env_for_migration {
+  local app_name=$1
+
+  if [[ -d ${WORKON_HOME}/${app_name}_migrate ]] ; then
+    workon ${app_name}_migrate
+    deactivate
+  fi
+
+  echo "Creating python virtual env for ${app_name} in ${WORKON_HOME}"
+  set +o errexit
+  # TODO: We're having to add the site-packages here for GDAL. This may cause problems later
+  # and we need to figure out how to get GDAL to compile locally
+  mkvirtualenv -a "/vagrant/apps/${app_name}" -p /usr/bin/python3 -r ${DEV_ENV_REQUIREMENTS} ${app_name}_migrate
+
+  set -e
+
+  echo "Activating virtual environment [${app_name}_migrate]"
+  set +o errexit
+  workon ${app_name}_migrate
+  set -e
+  pip -q install -r ${DEV_ENV_REQUIREMENTS}
+
+  if [[ -f /vagrant/apps/${app_name}/requirements.txt ]] ; then
+    pip -q install -r /vagrant/apps/${app_name}/requirements.txt
+  fi
+
+  if [[ -f /vagrant/apps/${app_name}/requirements_test.txt ]] ; then
+    pip -q install -r /vagrant/apps/${app_name}/requirements_test.txt
+  fi
+}
+
+function dump_apps_and_ports {
+  local app
+
+  for app in ${apps_and_ports}; do
+    echo ${app}
+  done
+}
+
+function check_all_apps_are_valid {
+  for app_to_start in $@; do
+    if [[ $(is_valid_app ${app_to_start}) != 1 ]] ; then
+      echo
+      echo "Can't find an app called [${app_to_start}] in the configuration file in /vagrant/config/apps"
+      echo
+      echo "The file currently contains:"
+      echo
+      dump_apps_and_ports
+      echo
+      exit 1
+    fi
+  done
+}
+
+function run_unit_tests_for_app {
+  local app_to_test=$1
+
+  check_all_apps_are_valid ${app_to_test}
+
+  current_dir=`pwd`
+  cd /vagrant/apps/${app_to_test}
+
+  if [[ ! -d ./tests ]] ; then
+    echo "No unit tests found for application ${app_to_test}"
+  else
+    echo "============================================================="
+    echo            RUNNING TESTS FOR ${app_to_test}
+    echo "-------------------------------------------------------------"
+    APP_DIR=/vagrant/apps/${app_to_test}
+    check_all_apps_are_valid ${app_to_test}
+    cd ${APP_ROOT}
+
+    set +o errexit
+    configure_virtual_env_for_apps ${app_to_test}
+    workon ${app_to_test}
+    source_app_environment $app_to_test
+    source_app_test_environment $app_to_test
+
+    if [[ -z ${SETTINGS} ]] ; then
+      export SETTINGS="test"
+    fi
+
+    if [[ -f ./manage.py ]]; then
+      APP_ROOT=${APP_DIR} python ./manage.py db upgrade
+    fi
+
+    APP_ROOT=${APP_ROOT} PORT=$(get_port_for_app $1) py.test -vv --doctest-modules --cov-report html --tb=short --cov-report term tests/
+    deactivate
+    set -e
+    echo "Coverage reports have been generated in the directory 'htmlcov'"
+    echo "On your host mac you can view these by running"
+    echo
+    echo "  open htmlcov/index.html"
+    echo
+    echo "from this directory"
+  fi
+
+  cd ${current_dir}
+}
+
+function die_if_procfile_is_present {
+  if [[ -f /vagrant/Procfile ]]; then
+    echo
+    echo "You already have a Procfile in /vagrant/Procfile which is running the following apps"
+    echo
+    for proc_definition in `cat /vagrant/Procfile | cut -d':' -f1`; do
+      echo ${proc_definition}
+    done
+    echo
+    echo "This either means that you already have some applications running"
+    echo "   OR"
+    echo "the applications have died leaving a Procfile behind"
+    echo
+    echo "Either stop the apps or remove the Procfile"
+    echo "DONT'T JUST REMOVE THE PROCFILE WITHOUT STOPPING THE APPS"
+    echo
+    exit 1
+  fi
+}
+
+function remove_procfile_on_exit {
+    rm -f /vagrant/Procfile
+}
+
+function die_cant_find_any_apps {
+  echo
+  echo "You've called this script without specifiy which apps you need and I can't find a run_dev.sh"
+  echo "in the current directory [`pwd`]"
+  echo
+  echo
+  exit 1
+}
+
+function configure_virtual_env_for_apps {
+  for app_to_start in $@; do
+    (
+      create_virtual_env ${app_to_start}
+      deactivate
+    )
+  done
+}
+
+function configure_nginx_and_host_file {
+
+  APPSLIST=/vagrant/config/apps
+  SPLASH_PAGE=/vagrant/config/index.html
+
+  export DOMAIN="landregistry.local"
+
+  # Ensure domain
+  TMPDEFAULT=$(mktemp -t nginx-default.XXXXXX)
+#  cp /etc/nginx/sites-available/default $TMPDEFAULT
+#  perl -pi -e 's/server_name localhost/server_name $ENV{"DOMAIN"}/g' $TMPDEFAULT
+#  sudo cp $TMPDEFAULT /etc/nginx/sites-available/default
+
+  ETCHOSTS="$DOMAIN "
+
+  # Configure each app
+  apps_and_ports=$(cat $APPSLIST | grep -v \# | grep -v '^\s*$')
+  for app_and_port in ${apps_and_ports}; do
+    app=$(echo ${app_and_port} | cut -d':' -f1)
+    port=$(echo ${app_and_port} | cut -d':' -f2)
+    if [ $port == 0 ]; then
+      continue;
+    fi
+
+    # delete the old configurations
+    sudo rm -rf /etc/nginx/sites-available/$app >/dev/null
+    sudo rm -rf /etc/nginx/sites-enabled/$app >/dev/null
+
+    # re-create the configuration
+    sudo tee "/etc/nginx/sites-available/$app" > /dev/null <<EOF
+  server {
+    server_name $app.$DOMAIN;
+    location / {
+
+      if (\$request_method = 'OPTIONS') {
+        add_header 'Access-Control-Allow-Origin' '*';
+        add_header 'Access-Control-Allow-Credentials' 'true';
+        add_header 'Access-Control-Allow-Methods' 'OPTIONS,GET,HEAD,POST,MERGE,PATCH,DELETE,PUT';
+        add_header 'Access-Control-Allow-Headers' 'X-PINGOTHER,Content-Type,MaxDataServiceVersion,DataServiceVersion,Authorization,X-Requested-With,If-Modified-Since';
+        add_header 'Access-Control-Max-Age' 1728000;
+        add_header 'Content-Type' 'text/plain; charset=UTF-8';
+        add_header 'Content-Length' 0;
+        return 204;
+      }
+      add_header 'Access-Control-Allow-Origin' '*';
+      add_header 'Access-Control-Allow-Credentials' 'true';
+      add_header 'Access-Control-Allow-Methods' 'OPTIONS,GET,HEAD,POST,MERGE,PATCH,DELETE,PUT';
+      add_header 'Access-Control-Allow-Headers' 'X-PINGOTHER,Content-Type,MaxDataServiceVersion,DataServiceVersion,Authorization,X-Requested-With,If-Modified-Since';
+
+      add_header 'iv-user' 'dev-test';
+      add_header 'iv-groups' 'drv';
+      add_header 'iv-user-l' 'test';
+      add_header 'iv-creds' '123456789';
+
+      proxy_pass http://localhost:$port;
+      proxy_set_header X-Real-IP \$remote_addr;
+      proxy_set_header Host \$http_host;
+      proxy_set_header 'iv-user' 'dev-test';
+      proxy_set_header 'iv-groups' 'drv';
+      proxy_set_header 'iv-user-l' 'test';
+      proxy_set_header 'iv-creds' '123456789';
+      proxy_pass_request_headers      on;
+
+    }
+  }
+EOF
+    # re-link
+    sudo ln -s /etc/nginx/sites-available/$app /etc/nginx/sites-enabled/$app
+    export ETCHOSTS="$ETCHOSTS $app.$DOMAIN"
+    export APP_HTML_LIST="$APP_HTML_LIST <tr><td>$app</td><td>$port</td><td><a href=\"http://$app.$DOMAIN:$port\">$app.$DOMAIN:$port</a></td></tr>"
+  done
+
+  # hook up helpful splash page
+  # (I have to use a temp file, otherwise the result is blank, weirdly)
+  TEMP=$(mktemp -t dev-env-splash-page.XXXXXX)
+  sudo cp $SPLASH_PAGE $TEMP
+  perl -pi -e 's/PLACEHOLDER/$ENV{"APP_HTML_LIST"}/g' $TEMP
+  sudo cp $TEMP /usr/share/nginx/html/index.html
+  sudo cp /vagrant/config/spy.html /usr/share/nginx/html/spy.html
+  sudo cp /vagrant/config/spy.js /usr/share/nginx/html/spy.js
+  sudo service nginx restart > /dev/null 2>&1
+}

@@ -1,0 +1,154 @@
+#!/bin/bash
+set -e
+
+echo "Cleaning Yum Cache"
+yum clean all
+
+echo "Refreshing Yum Cache"
+yum makecache
+
+echo "Installing EPEL"
+sudo yum install epel-release
+
+echo "Installing Git"
+sudo yum -y groupinstall "Development Tools"
+sudo yum -y install gettext-devel openssl-devel perl-CPAN perl-devel zlib-devel
+wget https://github.com/git/git/archive/v2.1.2.tar.gz -O git.tar.gz
+tar -zxf git.tar.gz
+cd git-*
+make configure
+./configure --prefix=/usr
+sudo make install
+
+echo "Installing nodejs"
+yum -y install nodejs
+
+echo "Installing ruby dev tools"
+yum -y install gcc ruby-devel rubygems
+
+echo "Installing VIM"
+yum -y install vim
+
+echo "Installing libxml2 (Required by rails)"
+yum install -y libxml2 libxslt libxml2-devel
+
+echo "Installing python pip"
+yum -y install python-pip
+
+echo "Installing python packages"
+pip install virtualenvwrapper
+
+echo "Installing nginx"
+sudo rpm -Uvh http://nginx.org/packages/centos/7/noarch/RPMS/nginx-release-centos-7-0.el7.ngx.noarch.rpm
+sudo yum install -y nginx
+
+echo "Installing Ruby gems"
+gem install foreman
+
+echo "Installing killall command tool"
+yum install -y psmisc
+
+echo "Installing libcurl-devel to support testing of PDFs"
+yum install -y libcurl-devel
+
+
+echo "Creating log directory"
+mkdir -p /var/log/applications
+sudo chown vagrant /var/log/applications
+
+echo "Bootstrapping environment"
+su vagrant -c cat <<EOF > /home/vagrant/.ssh/config
+Host github.com
+StrictHostKeyChecking no
+
+EOF
+chown -R vagrant:vagrant /home/vagrant
+su vagrant -c /vagrant/script/bin/bootstrap
+
+cat <<EOF > ${bash_profile}
+
+export WORKON_HOME=${WORKON_HOME}
+export PATH=/vagrant/script/bin:/usr/local/bin/:/home/vagrant/bin/:${PATH}
+
+source /usr/bin/virtualenvwrapper.sh
+alias ls="ls -F"
+cd /vagrant
+
+EOF
+
+mkdir /etc/nginx/sites-available/
+mkdir /etc/nginx/sites-enabled/
+
+cat <<EOF > /etc/nginx/conf.d/default.conf
+server {
+#    listen       80;
+#    server_name  *;
+
+     listen 80 default_server;
+     server_name _;
+
+
+    #charset koi8-r;
+    #access_log  /var/log/nginx/log/host.access.log  main;
+
+    location / {
+        root   /usr/share/nginx/html;
+        index  index.html index.htm;
+    }
+
+    #error_page  404              /404.html;
+
+    # redirect server error pages to the static page /50x.html
+    #
+    error_page   500 502 503 504  /50x.html;
+    location = /50x.html {
+        root   /usr/share/nginx/html;
+    }
+
+    # proxy the PHP scripts to Apache listening on 127.0.0.1:80
+    #
+    #location ~ \.php$ {
+    #    proxy_pass   http://127.0.0.1;
+    #}
+
+    # pass the PHP scripts to FastCGI server listening on 127.0.0.1:9000
+    #
+    #location ~ \.php$ {
+    #    root           html;
+    #    fastcgi_pass   127.0.0.1:9000;
+    #    fastcgi_index  index.php;
+    #    fastcgi_param  SCRIPT_FILENAME  /scripts$fastcgi_script_name;
+    #    include        fastcgi_params;
+    #}
+
+    # deny access to .htaccess files, if Apache's document root
+    # concurs with nginx's one
+    #
+    #location ~ /\.ht {
+    #    deny  all;
+    #}
+}
+EOF
+
+echo "Configuring nginx"
+
+echo "Configuring /etc/hosts"
+ETCHOSTS=`cat /tmp/etchosts`
+
+cat <<EOF > /etc/hosts
+::1 ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+ff02::3 ip6-allhosts
+0.0.0.0  lr-dev lr-ubuntu
+172.16.10.10 ${ETCHOSTS}
+EOF
+
+rm -f /tmp/etchosts
+
+# A reminder...
+echo "Copying motd"
+sudo cp /vagrant/config/motd /etc/motd
+
